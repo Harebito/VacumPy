@@ -1,14 +1,22 @@
-import serial, serial.tools.list_ports ,sqlite3
+import serial, serial.tools.list_ports, sqlite3
 import tkinter as tk
 from tkinter import ttk
-from datetime import datetime
+from datetime import datetime # For midnight DB rotation
+from pathlib import Path
+from typing import final
 
-import traceback
+import traceback #DEBUG
 
+@final
 class DB_Handler:
     def __init__(self) -> None:
+        self.data_dir = Path("logs")
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get current Year, Month, Day for database name
         self.current_date_str = datetime.now().strftime("%Y_%m_%d")
-        self.db_name = f"Vacuumeter_log_{self.current_date_str}.db"
+        self.db_name = self.data_dir / f"Vacuumeter_log_{self.current_date_str}.db"
+
         self.connection = None
 
     def connect(self): # Connect to database
@@ -23,7 +31,7 @@ class DB_Handler:
         if self.connection is None:
             print("ERROR: Not connected to database. Not connected!")
             return
-        
+
         try:
             cursor = self.connection.cursor()
             _ = cursor.execute("""
@@ -42,22 +50,24 @@ class DB_Handler:
 
     def write(self, parsed_data): # Write actual data to database
         self._rotate_if_needed() # Check if rotation is needed
+        """ We check if database rotation is needed before write to no initialize empty database
+        if app is running but no device connected/we are connected but packets are not sent"""
 
         if self.connection is None:
             print("ERROR: Cannot write to database. Not connected!")
             return
-        
+
         try:
             cursor = self.connection.cursor()
             _ = cursor.execute("""
                 INSERT INTO sensors_data (timestamp, sensor_1, sensor_2, sensor_3) 
                 VALUES (:time, :s1, :s2, :s3)
             """, {
-                "time": parsed_data["timestamp"],
-                "s1": parsed_data["sensor_1"],
-                "s2": parsed_data["sensor_2"],
-                "s3": parsed_data["sensor_3"]
-            })
+                "time": parsed_data["time"],
+                "s1": parsed_data["s1"],
+                "s2": parsed_data["s2"],
+                "s3": parsed_data["s3"]
+                })
 
             self.connection.commit()
             print(f"Saved row: {parsed_data}")
@@ -89,7 +99,7 @@ class DB_Handler:
                 print(f"ERROR: Failed to close database safely: {e}")
             finally:
                 self.connection = None
-
+@final
 class Serial_handler:
     def __init__(self, baudrate=9600) -> None:
         self.baudrate = baudrate
@@ -111,7 +121,7 @@ class Serial_handler:
 
     def connect(self, port_name): #Connect to device
         try:
-            self.connection = serial.Serial(port_name, baudrate=self.baudrate, timeout=1)
+            self.connection = serial.Serial(port_name, baudrate=self.baudrate, timeout=0)
             print(f"SUCCESS: Connect to {port_name}")
             return True
 
@@ -125,16 +135,22 @@ class Serial_handler:
             self.connection.close()
             print("Serial port closed safely.")
             self.connection = None
-
+@final
 class Ui:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Vacuumapp")
         self.root.geometry("400x200")
 
+        # Serial connection and Database objects
         self.serial = Serial_handler()
         self.db = DB_Handler()
+        self.db.connect()
+        self.db.create_table()
 
+        self.data_buffer = ""
+
+        # Window customisation
         self.label = tk.Label(self.root, text="Select a port and start", font=("Arial", 12))
         self.label.pack(pady=10)
 
@@ -143,14 +159,16 @@ class Ui:
 
         self.port_selector = ttk.Combobox(self.port_frame, state="readonly", width=20)
         self.port_selector.pack(side=tk.LEFT, padx=5)
-        
-        self.refresh_button = tk.Button(self.root, text="Start Scan", command=self.on_button_click)
-        self.refresh_button.pack(side=tk.LEFT, padx=5)
 
-        self.refresh_ports()
+        self.refresh_button = tk.Button(self.root, text="Refresh", command=self.refresh_ports)
+        self.refresh_button.pack(side=tk.LEFT, padx=5)
 
         self.start_button = tk.Button(self.root, text="Start Scan", command=self.on_button_click)
         self.start_button.pack(pady=15)
+
+
+        # First refresh to list if device was connected before launching the app
+        self.refresh_ports()
 
     def refresh_ports(self) -> None:
         available_ports = self.serial.list_ports()
@@ -158,30 +176,104 @@ class Ui:
         self.port_selector['values'] = available_ports
 
         if available_ports:
-            self.port_selector.current(0)
-            self.label.config(text="Select a port and start", fg="black")
+            _ = self.port_selector.current(0)
+            _ = self.label.config(text="Select a port and start", fg="black")
         else:
             self.port_selector.set("No USB devices found")
-            self.label.config(text="Plug in a device and click Refresh", fg="orange")
+            _ = self.label.config(text="Plug in a device and click Refresh", fg="orange")
 
 
     def on_button_click(self) -> None:
         selected_port = self.port_selector.get()
 
         if selected_port == "No USB devices found" or selected_port == "":
-            self.label.config(text="Error: No valid port selected!", fg="red")
+            _ = self.label.config(text="Error: No valid port selected!", fg="red")
             return
-        self.label.config(text=f"Connecting to {selected_port}...", fg="black")
+
+        _ = self.label.config(text=f"Connecting to {selected_port}...", fg="black")
         success = self.serial.connect(selected_port)
 
         if success:
-            self.label.config(text=f"Scanning on {selected_port}...", fg="green")
+            _ = self.label.config(text=f"Scanning on {selected_port}...", fg="green")
+            _ = self.start_button.config(state="disabled") 
+            _ = self.refresh_button.config(state="disabled")
+            _ = self.port_selector.config(state="disabled")
 
-            self.start_button.config(state="disabled")
-            self.refresh_button.config(state="disabled")
-            self.port_selector.config(state="disabled")
+            _ = self._read_usb_loop()
+
         else:
-            self.label.config(text=f"Failed to open {selected_port}", fg="red")
+            _ = self.label.config(text=f"Failed to open {selected_port}", fg="red")
+
+
+    def _read_usb_loop(self) -> None:
+        #        print("Background worker thread started!")
+
+        if self.serial.connection is None or not self.serial.connection.is_open:
+            print("Background polling stopped.")
+            return
+
+        try:
+            # Grab any bytes that arrived
+            bytes_waiting = self.serial.connection.in_waiting
+            if bytes_waiting > 0: # If anything is present in buffer
+
+                raw_bytes = self.serial.connection.read(bytes_waiting)
+
+                # Add read bytes to buffer
+                self.data_buffer += raw_bytes.decode('utf-8', errors='ignore').strip()
+
+                """PySerial's read_until() is blocking call, if packet end ';;' were to
+                never arrive, the app hangs indefinitely"""
+
+                while "$" in self.data_buffer and ";;" in self.data_buffer:
+                    start_idx = self.data_buffer.find("$")
+                    end_idx = self.data_buffer.find(";;")
+
+                    # If we did not catch the start of packet we ignore current packet
+                    if end_idx < start_idx:
+                        self.data_buffer = self.data_buffer[start_idx:]
+                        continue
+
+                    packet = self.data_buffer[start_idx : end_idx + 2]
+
+                    # Remove packet from buffer
+                    self.data_buffer = self.data_buffer[end_idx + 2 :]
+
+                    parsed_data = self.parse_payload(packet)
+                    if parsed_data:
+                        print(f"PACKET: {packet}")
+                        self.db.write(parsed_data)
+
+
+                    # TODO: Send packet to Database
+
+        except Exception as e:
+            print(f"CRITICAL: USB Read Error: {e}")
+            return
+
+        _ = self.root.after(50, self._read_usb_loop)
+
+    # Parses raw string into dict for database
+    def parse_payload(self, packet: str):
+        try:
+            clean_str = packet.strip("$;")
+
+            parts = clean_str.split(";")
+
+            if len(parts) == 4:
+                parsed_data = {
+                        "time": parts[0],
+                        "s1": float(parts[1]),
+                        "s2": float(parts[2]),
+                        "s3": float(parts[3])
+                }
+                return parsed_data
+            else:
+                print(f"Warning: Incomplete packet dropped: {packet}")
+                return None
+        except Exception as e:
+            print(f"Error parsing packet {packet}: {e}")
+            return None
 
 
     def run(self) -> None:
@@ -199,4 +291,4 @@ if __name__ == "__main__":
         print("\n=== CRASH DETECTED ===")
         print(f"Error: {e}")
         traceback.print_exc() # This prints the exact line number of the crash
-        input("\nPress Enter to exit...") # This forces the terminal to stay open!
+        _ = input("\nPress Enter to exit...") # This forces the terminal to stay open!

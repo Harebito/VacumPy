@@ -165,7 +165,9 @@ class Ui:
 
         self.start_button = tk.Button(self.root, text="Start Scan", command=self.on_button_click)
         self.start_button.pack(pady=15)
-
+        
+        self.stop_button = tk.Button(self.root, text="Stop Scan", command=self.on_stop_click, state="disabled")
+        self.stop_button.pack(pady=5) 
 
         # First refresh to list if device was connected before launching the app
         self.refresh_ports()
@@ -198,12 +200,20 @@ class Ui:
             _ = self.start_button.config(state="disabled") 
             _ = self.refresh_button.config(state="disabled")
             _ = self.port_selector.config(state="disabled")
+            _ = self.stop_button.config(state="normal")
 
             _ = self._read_usb_loop()
 
         else:
             _ = self.label.config(text=f"Failed to open {selected_port}", fg="red")
 
+    def on_stop_click(self) -> None:
+        self.serial.close()
+        _ = self.label.config(text="Scan stopped. Ready.", fg="black")
+        _ = self.start_button.config(state="normal")
+        _ = self.refresh_button.config(state="normal")
+        _ = self.port_selector.config(state="readonly") # Comboboxes use 'readonly', not 'normal'
+        _ = self.stop_button.config(state="disabled")
 
     def _read_usb_loop(self) -> None:
         #        print("Background worker thread started!")
@@ -220,7 +230,7 @@ class Ui:
                 raw_bytes = self.serial.connection.read(bytes_waiting)
 
                 # Add read bytes to buffer
-                self.data_buffer += raw_bytes.decode('utf-8', errors='ignore').strip()
+                self.data_buffer += raw_bytes.decode('utf-8', errors='ignore')
 
                 """PySerial's read_until() is blocking call, if packet end ';;' were to
                 never arrive, the app hangs indefinitely"""

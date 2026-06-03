@@ -4,6 +4,7 @@ from tkinter import ttk
 from datetime import datetime # For midnight DB rotation
 from pathlib import Path
 from typing import final
+import threading, time
 
 import traceback #DEBUG
 
@@ -20,8 +21,8 @@ class DB_Handler:
         self.connection = None
 
     def connect(self): # Connect to database
-        try:
-            self.connection = sqlite3.connect(self.db_name)
+        try: # check_same_thread=False to allow the background thread to write data safely
+            self.connection = sqlite3.connect(self.db_name, check_same_thread=False)
             print(f"Connected to {self.db_name}")
         except sqlite3.Error as e:
             print(f"CRITICAL: Failed to open {self.db_name}")
@@ -149,6 +150,8 @@ class Ui:
         self.db.create_table()
 
         self.data_buffer = ""
+        self.is_scanning = False
+        self.read_thread = None
 
         # Window customisation
         self.label = tk.Label(self.root, text="Select a port and start", font=("Arial", 12))
@@ -192,7 +195,6 @@ class Ui:
             _ = self.label.config(text="Error: No valid port selected!", fg="red")
             return
 
-        _ = self.label.config(text=f"Connecting to {selected_port}...", fg="black")
         success = self.serial.connect(selected_port)
 
         if success:
@@ -201,67 +203,64 @@ class Ui:
             _ = self.refresh_button.config(state="disabled")
             _ = self.port_selector.config(state="disabled")
             _ = self.stop_button.config(state="normal")
-
-            _ = self._read_usb_loop()
+            
+            self.is_scanning = True
+            self.read_thread = threading.Thread(target=self._usb_thread_worker, daemon=True)
+            self.read_thread.start()
 
         else:
             _ = self.label.config(text=f"Failed to open {selected_port}", fg="red")
 
     def on_stop_click(self) -> None:
+        self.is_scanning = False
+
         self.serial.close()
+
         _ = self.label.config(text="Scan stopped. Ready.", fg="black")
         _ = self.start_button.config(state="normal")
         _ = self.refresh_button.config(state="normal")
         _ = self.port_selector.config(state="readonly") # Comboboxes use 'readonly', not 'normal'
         _ = self.stop_button.config(state="disabled")
 
-    def _read_usb_loop(self) -> None:
+    def _usb_thread_worker(self) -> None:
         #        print("Background worker thread started!")
 
-        if self.serial.connection is None or not self.serial.connection.is_open:
-            print("Background polling stopped.")
-            return
+        while self.is_scanning and self.serial.connection and self.serial.connection.is_open:
+            try:
+                bytes_waiting = self.serial.connection.in_waiting
+                if bytes_waiting > 0:
+                    raw_bytes = self.serial.connection.read(bytes_waiting)
+                    
+                    # Notice: NO .strip() here, so we don't mangle chunks mid-stream!
+                    self.data_buffer += raw_bytes.decode('utf-8', errors='ignore')
 
-        try:
-            # Grab any bytes that arrived
-            bytes_waiting = self.serial.connection.in_waiting
-            if bytes_waiting > 0: # If anything is present in buffer
+                    while "$" in self.data_buffer and ";;" in self.data_buffer:
+                        start_idx = self.data_buffer.find("$")
+                        end_idx = self.data_buffer.find(";;")
 
-                raw_bytes = self.serial.connection.read(bytes_waiting)
+                        if end_idx < start_idx:
+                            self.data_buffer = self.data_buffer[start_idx:]
+                            continue
 
-                # Add read bytes to buffer
-                self.data_buffer += raw_bytes.decode('utf-8', errors='ignore')
+                        packet = self.data_buffer[start_idx : end_idx + 2]
+                        self.data_buffer = self.data_buffer[end_idx + 2 :]
 
-                """PySerial's read_until() is blocking call, if packet end ';;' were to
-                never arrive, the app hangs indefinitely"""
+                        parsed_data = self.parse_payload(packet)
+                        if parsed_data:
+                            print(f"THREAD CAPTURED: {packet}")
+                            self.db.write(parsed_data)
+                            
+                            # Optional UI Update: update main window text safely
+                            # self.label.config(text=f"Last Reading: {parsed_data['s3']}")
 
-                while "$" in self.data_buffer and ";;" in self.data_buffer:
-                    start_idx = self.data_buffer.find("$")
-                    end_idx = self.data_buffer.find(";;")
+            except Exception as e:
+                print(f"CRITICAL: Thread USB Read Error: {e}")
+                break
+                
+            # CRITICAL: Sleep for 10ms so this background thread doesn't max out your CPU
+            time.sleep(0.01)
 
-                    # If we did not catch the start of packet we ignore current packet
-                    if end_idx < start_idx:
-                        self.data_buffer = self.data_buffer[start_idx:]
-                        continue
-
-                    packet = self.data_buffer[start_idx : end_idx + 2]
-
-                    # Remove packet from buffer
-                    self.data_buffer = self.data_buffer[end_idx + 2 :]
-
-                    parsed_data = self.parse_payload(packet)
-                    if parsed_data:
-                        print(f"PACKET: {packet}")
-                        self.db.write(parsed_data)
-
-
-                    # TODO: Send packet to Database
-
-        except Exception as e:
-            print(f"CRITICAL: USB Read Error: {e}")
-            return
-
-        _ = self.root.after(50, self._read_usb_loop)
+        print("Background thread worker stopped cleanly.")
 
     # Parses raw string into dict for database
     def parse_payload(self, packet: str):

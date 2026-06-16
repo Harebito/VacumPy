@@ -102,7 +102,7 @@ class DB_Handler:
                 self.connection = None
 @final
 class Serial_handler:
-    def __init__(self, baudrate=9600) -> None:
+    def __init__(self, baudrate=115200) -> None:
         self.baudrate = baudrate
         self.connection = None
 

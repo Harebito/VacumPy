@@ -166,10 +166,10 @@ class Ui:
         self.refresh_button = tk.Button(self.root, text="Refresh", command=self.refresh_ports)
         self.refresh_button.pack(side=tk.LEFT, padx=5)
 
-        self.start_button = tk.Button(self.root, text="Start Scan", command=self.on_button_click)
+        self.start_button = tk.Button(self.root, text="Connect", command=self.on_button_click)
         self.start_button.pack(pady=15)
         
-        self.stop_button = tk.Button(self.root, text="Stop Scan", command=self.on_stop_click, state="disabled")
+        self.stop_button = tk.Button(self.root, text="Disconnect", command=self.on_stop_click, state="disabled")
         self.stop_button.pack(pady=5) 
 
         # First refresh to list if device was connected before launching the app
@@ -216,7 +216,7 @@ class Ui:
 
         self.serial.close()
 
-        _ = self.label.config(text="Scan stopped. Ready.", fg="black")
+        _ = self.label.config(text="Disconnected. Ready.", fg="black")
         _ = self.start_button.config(state="normal")
         _ = self.refresh_button.config(state="normal")
         _ = self.port_selector.config(state="readonly") # Comboboxes use 'readonly', not 'normal'

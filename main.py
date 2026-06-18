@@ -75,6 +75,7 @@ class DB_Handler:
 
         except sqlite3.Error as e:
             print(f"ERROR: Failed to insert data: {e}")
+            self.close()
 
     def _rotate_if_needed(self):
         today_str = datetime.now().strftime("%Y_%m_%d")
@@ -127,7 +128,7 @@ class Serial_handler:
             return True
 
         except serial.SerialException as e:
-            print(f"CRITICAL: Failer to open {port_name}")
+            print(f"CRITICAL: Failed to open {port_name}")
             print(f"Details: {e}")
             return False
 
@@ -189,6 +190,10 @@ class Ui:
 
 
     def on_button_click(self) -> None:
+        if self.db.connection is None:
+            _ = self.label.config(text="ERROR: Failed connecting to database.", fg="red")
+            return
+
         selected_port = self.port_selector.get()
 
         if selected_port == "No USB devices found" or selected_port == "":
@@ -249,14 +254,24 @@ class Ui:
                         if parsed_data:
                             print(f"THREAD CAPTURED: {packet}")
                             self.db.write(parsed_data)
-                            
-                            # Optional UI Update: update main window text safely
-                            # self.label.config(text=f"Last Reading: {parsed_data['s3']}")
+
+                            if self.db.connection is None:
+                                print("CRITICAL: Database connection lost!")
+                                self.is_scanning = False
+
+                                _ = self.root.after(0, self.on_stop_click)
+                                _ = self.root.after(100, lambda: self.label.config(text="ERROR: Write halted!", fg="red"))
+                                break
 
             except Exception as e:
                 print(f"CRITICAL: Thread USB Read Error: {e}")
+
+                self.is_scanning = False
+
+                _ = self.root.after(0, self.on_stop_click)
+                _ = self.root.after(100, lambda: self.label.config(text="ERROR: Lost connection to device!", fg="red"))
                 break
-                
+
             # CRITICAL: Sleep for 10ms so this background thread doesn't max out your CPU
             time.sleep(0.01)
 
@@ -275,7 +290,7 @@ class Ui:
                         "s1": float(parts[1]),
                         "s2": float(parts[2]),
                         "s3": float(parts[3])
-                }
+                        }
                 return parsed_data
             else:
                 print(f"Warning: Incomplete packet dropped: {packet}")
